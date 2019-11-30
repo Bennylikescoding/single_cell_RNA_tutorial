@@ -494,6 +494,7 @@ cowplot::plot_grid(p1, p2, p3, nrow=1, ncol=3)
 提取数据，自定义PCA可视化属性
 
 ```{r, fig.height=5, fig.width=13}
+# alpha is the transparency level
 pca <- FetchData(pbmc, vars=c("PC_1","PC_2","PC_3", colnames(pbmc@meta.data)))
 p1 <- ggplot(pca, aes(x=PC_1, y=PC_2)) + 
   geom_point(aes(size=nFeature_RNA, color=phases), alpha=0.5) + 
