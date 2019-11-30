@@ -326,7 +326,7 @@ pbmc
 ```
 
 
-### 数据标准化、归一化和移除干扰因素影响
+### 细胞数据标准化、归一化和移除干扰因素影响
 
 下面的代码框中是Seurat常用的三部曲，标准化、鉴定高变化基因、归一化（同时移除干扰因素影响）。数据存储在`RNA assay`中 (Seurat的一个通道)。
 
@@ -387,13 +387,17 @@ tmp.df<-VariableFeatures(object = pbmc)
 
 
 ```{r}
+tmp.df
+```
+
+```{r}
 head(tmp.df)
 ```
 
 
 
-#### Scaling the data 基因归一化
-
+#### Scaling the data 基因归一化, 
+建议不做。可以尝试可视化行不行再返回来看。
 
 这一步骤有待商榷，有些方法或软件并不包含下面两个步骤，此外，对效果提升有多大帮助，也值得留意。
 
@@ -429,6 +433,10 @@ Seurat通过构建线性模型，预测提供的变量因素对基因表达的�
 ```
 
 
+```{r}
+# 查看标准化后的矩阵
+pbmc@assays$RNA@scale.data[10:14,1:4]
+```
 
 
 ### Step 5: Perform linear dimensional reduction 线性降维PCA分析
