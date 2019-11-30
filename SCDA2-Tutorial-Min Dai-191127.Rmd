@@ -1,0 +1,1215 @@
+---
+title: "易生信-单细胞数据基础分析流程"
+output:
+  html_document:
+    theme: united
+    df_print: kable
+date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  tidy = TRUE,
+  tidy.opts = list(width.cutoff = 120),
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+Tutorial参考：https://satijalab.org/seurat/v3.0/pbmc3k_tutorial.html
+
+本Tutorial设计内容：
+
+1. Cell QC 单细胞数据细胞质控
+2. Gene expression normalization 单细胞数据基因表达标准化
+3. HVG selection 高变基因筛选
+4. Gene expression scaling 单细胞数据基因表达归一化
+5. Dimension reduction 包括PCA、t-SNE、UMAP和维数选择
+6. Clustering analysis 包括K-means clustering, Hierarchical clustering和graph-based clustering
+7. Marker基因鉴定和细胞类型注释
+8. Visualization 单细胞数据可视化包括Violin plot, feature plot, ridge plot, dot plot和heatmap
+
+
+### Install Seurat package
+
+安装Seurat包，推荐使用BiocManager，全能型函数，Cran, Bioconductor, GitHub上的包都可以通过这个命令来安装。
+
+菜单操作更改镜像为国内镜像，加快包的安装速度：`Tools` - `Global options` - `Packages` - `Primary CRAN respority` - `Change` - `Tsinghua`。
+
+```{r}
+# install.packages("BiocManager")
+# 需要先安装anaconda
+# BiocManager::install("Seurat")
+```
+
+191130: start here
+```{r}
+#setwd("F:/20191129_SC/21_Overall introduction")
+library(Seurat)
+```
+
+
+### Setup the Seurat Object
+
+我们使用的测试数据是基于10X Genomics的外周血单核细胞 Peripheral Blood Mononuclear Cells (PBMC) 的2,700个单细胞转录组数据。原始数据在： [here](https://s3-us-west-2.amazonaws.com/10x.files/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz).
+
+10X数据格式与用[Cellranger](https://mp.weixin.qq.com/s/qLqIA7Y3J9xf_tXlQj0FAw)生成的格式一致。注意路径：当前路径下的`data/pbmc3k_filtered_gene/filtered_gene_bc_matrices/hg19/`中，一直写到`barcodes.tsv`, `genes.tsv`, `matrix.mtx`所在的目录。
+
+
+基于这三个文件，构建`Seurat`对象并进行后续分析。关于Seurat对象，具体见.[GitHub Wiki](https://github.com/satijalab/seurat/wiki). 例如 `count matrix`存储在 `pbmc[["RNA"]]@counts`。
+
+
+```{r}
+# 数据初始化, Cellranger输出的文件夹
+# 注意路径
+pbmc_10x_reads_count_dir <- "data/pbmc3k_filtered_gene/filtered_gene_bc_matrices/hg19/"
+
+# 可选，一般是样品的分组，来源，实验批次等。这里存储的是后面预测的细胞周期的信息。
+# 注意这里面的列的名字，后面程序中会用到一部分样品属性信息用于可视化。
+metadata <- "data/pbmc3k_filtered_gene/pbmc_metadata.txt"
+
+#project name， 无特殊用途
+project_name <- "YSX"
+```
+
+
+利用library()来加载包：
+
+```{r init}
+library(dplyr)
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+
+# Load the PBMC dataset
+pbmc.data <- Read10X(data.dir = pbmc_10x_reads_count_dir)
+metadata <- read.table(metadata, header=T, row.names=1, sep="\t")
+
+# Initialize the Seurat object with the raw (non-normalized data).  Keep all
+# genes expressed in >= 3 cells (~0.1% of the data). Keep all cells with at
+# least 200 detected features
+
+# build a Seurat object
+pbmc <- CreateSeuratObject(counts = pbmc.data, min.cells = 3, min.features = 200, 
+    project = project_name, meta.data = metadata)
+```
+
+
+```{r}
+pbmc
+```
+
+看数据类型
+
+```{r}
+# structure of the data
+str(pbmc.data)
+```
+
+查看数据类型：
+dgCMatrix专门用于存储稀疏矩阵，即大部分元素都为0的矩阵，下面输出结果中“.”表示0。
+
+```{r}
+# col name is barcode of each single cell
+pbmc.data[1:4,1:4]
+```
+
+查看数据维度：
+
+```{r}
+dim(metadata)
+```
+
+用head()命令来打印前几行：
+
+```{r}
+head(metadata)
+```
+
+用tail()命令来打印最后几行：
+
+```{r}
+tail(metadata)
+```
+
+用table()命令来看类别变量的分布：
+
+```{r}
+table(metadata$phases)
+```
+
+
+
+
+用plot(density())能够很快地看到连续值的分布情况：
+
+```{r}
+plot(density(metadata$G1))
+```
+
+
+查看Seurat对象存储的信息：
+
+```{r}
+str(pbmc)
+```
+
+
+可以通过`saveRDS()`将R语言环境中的变量导出到本地，方便保存或分享数据，同时可以利用`readRDS()`来读取之前保存的变量。
+
+```{r}
+# 单细胞一般不会太关注原始数据，因为前期大部分都是一样的，但若作者提供RDS，则会很快重复原文图或直接找自己感兴趣的问题（RDS文件小）
+# saveRDS(pbmc,file="your_own_path")
+# pbmc_read<-readRDS("your_own_path")
+
+saveRDS(pbmc,file="save/pbmc.save")
+pbmc_read<-readRDS("save/pbmc.save")
+```
+
+
+查看metadata文件列信息
+
+```{r}
+colnames(pbmc@meta.data)
+```
+
+随机查看部分基因在部分细胞的原始reads counts
+
+```{r}
+pbmc[["RNA"]]@counts[11:14,1:30]
+```
+
+另一种方式，查看部分基因在部分细胞的原始reads counts
+
+思考：什么时候用`$`?什么时候用`@`?
+
+```{r}
+pbmc@assays$RNA@counts[11:14,1:30]
+```
+
+可以看到，因为scRNA-seq的表达矩阵具有稀疏的特点，很多位置上都为零，所以数据以`sparse Matrix`的格式来存，只需要记录有值位置的row和column的序号以及相应值的大小。(`.`代表0，没有检测到表达。)
+
+```{r}
+# Lets examine a few genes in the first thirty cells
+# 根据自己的物种类型，修改对应基因的名字
+pbmc.data[c("CD3D","TCL1A","MS4A1"), 1:30]
+```
+
+
+```{r}
+plot(density(pbmc.data[c("MS4A1"), 1:30]))
+```
+
+
+稀疏矩阵存储可以大大减少所需的内存和运行时间。
+
+````{r}
+dense.size <- object.size(x = as.matrix(x = pbmc.data))
+dense.size
+sparse.size <- object.size(x = pbmc.data)
+sparse.size
+
+# 常规矩阵是稀疏矩阵所需内存空间的近24倍
+dense.size / sparse.size
+```
+
+
+### Step 1: Standard pre-processing workflow 常规的预处理流程
+
+The steps below encompass the standard pre-processing workflow for scRNA-seq data in Seurat. These represent the selection and filtration of cells based on QC metrics, data normalization and scaling, and the detection of highly variable features.
+
+#### 质控和细胞过滤
+
+`CreateSeuratObject`函数在构建Seurat对象时用较低的阈值做了过滤，保留检测基因数大于200的细胞，保留在至少3个细胞里面表达的基因。
+
+下面是Seurat处理scRNA-seq数据的标准预处理流程，包括根据质控矩阵选择和过滤细胞、数据标准化 (`normalization`, `scale`)、筛选高度变化基因。
+
+常用的质控信息有(https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4758103/)：
+
+* 每个细胞检测到的基因数目的分布
+  * 如果细胞之间的基因检出率相当，应该符合正态分布。
+  * 基因数过低的细胞可能是捕获率低或细胞破碎或空beads。
+  * 基因数过高可能是doublets或multiplets。
+* 每个细胞总的UMI (reads)数的分布：与基因数一般是很强的正相关，拥有很少的reads或UMI分子数的样品可能是细胞破损或捕获失败，应该移除。
+* 线粒体基因表达所占的比例
+  * 线粒体基因表达多了，其它内源性基因占比就会少，可能由于细胞受胁迫诱导导致。
+  * 当然也有部分细胞，线粒体比例正常就是比较高的。
+  * 一般低质量或死亡细胞线粒体污染比例高一些。
+  * 基因名字以`MT-`开头的基因定义为线粒体基因(适用于模式生物)，使用`PercentageFeatureSet`函数计算。
+
+
+MD: Cell QC
+
+Aim: remove low-quality cells (noise, false signal)
+
+
+主要看什么：
+
+1. 每个细胞检测到的分子数（和检测到的基因数密切相关）
+2. 看线粒体基因表达的比例（low-quality and dying cells的线粒体含量比例高)
+
+问题：
+
+Q: 如何计算线粒体基因的含量？
+
+A: 人、鼠gene symbol以`MT-`开头的基因都是线粒体基因。
+
+```{r mito, fig.height=7, fig.width=13}
+# The [[ operator can add columns to object metadata. 
+# This is a great place to stash QC stats
+# 注意：不只是计算方式变了，数据存储也从小数 (Seurat 2)变成了百分数 (Seurat 3)。
+pbmc[["percent.mt"]] <- PercentageFeatureSet(object = pbmc, pattern = "^MT-")
+```
+
+查看线粒体基因的含量
+
+```{r}
+pbmc@meta.data$percent.mt[1:10]
+```
+
+总检测到的基因数和UMI数(reads数)是在`CreateSeuratObject`时自动计算的，可以通过下面命令查看。
+
+
+```{r qc, fig.height=7, fig.width=13}
+# Show QC metrics for the first 5 cells
+head(x = pbmc@meta.data, 5)
+```
+ 
+
+可视化不同质控结果的分布
+
+```{r}
+# Visualize QC metrics as a violin plot
+# 
+VlnPlot(object = pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+```{r}
+# 用命令导出保存成pdf，比export图好用
+pdf("test001.pdf")
+VlnPlot(object = pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+dev.off()
+```
+
+通过二维散点图，来看不同metric之间的关系。查看不同质控结果的分布相关性，线粒体含量高的细胞总UMI分子数少，推测是细胞状态受损导致的。UMI count数与检测到的基因数是正相关的。
+
+```{r  fig.height=5, fig.width=11}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(object = pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt") + theme(legend.position="none")
+plot2 <- FeatureScatter(object = pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + theme(legend.position="none")
+CombinePlots(plots = list(plot1,plot2))
+# 也可以用cowplot
+# cowplot::plot_grid(plot1, plot2, nrow=1, ncol=2)
+```
+
+
+```{r}
+# 也可用ggpubr绘图，质量很好
+
+```
+
+
+#### 过滤细胞
+
+保留线粒体基因比例在`5%`以内 (**注意**线粒体基因比例存储方式由小数变成了百分数)，检测到的基因数在`200-2500`之间的细胞。
+    
+```{r qc2}
+# 设定三个cutoff值
+pbmc <- subset(x = pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+```
+
+```{r}
+pbmc
+```
+
+
+### 数据标准化、归一化和移除干扰因素影响
+
+下面的代码框中是Seurat常用的三部曲，标准化、鉴定高变化基因、归一化（同时移除干扰因素影响）。数据存储在`RNA assay`中 (Seurat的一个通道)。
+
+移除细胞之后进行表达数据标准化，这里用的方法比较粗暴，每个基因的表达值除以样品所有基因表达值再乘以10,000，然后取对数 (log CPM)。标准化后的数据存储在`pbmc[["RNA"]]@data`中。
+
+值得注意的是，counts per million (CPM)对应的scale.factor是`1e6`。如果不想做log transformation，可以normalization.method设置为"RC"，具体的可以输入`?NormalizeData`来进行查看。
+
+
+```{r normalize}
+# 一般常用LogNormalize标准化。
+pbmc <- NormalizeData(object = pbmc, normalization.method = "LogNormalize",
+                      scale.factor = 1e4)
+```
+
+
+
+```{r}
+pbmc@assays$RNA@counts[11:14,30:40]
+pbmc@assays$RNA@data[11:14,30:40]
+```
+
+
+
+### 识别高变化基因 Identification of highly variable features (feature selection) 筛选出HVGs
+
+通过计算基因在所有细胞表达的平均值和变异度选择表达值相对稳定，变化相对大的基因。这对于下游分析比较有意义。
+
+1. 筛选HVGs有助于减少数据中的noise
+2. 由于基因表达调控的特异性，很多基因在某些特定选择的细胞类型中并不发挥作用
+3. 细胞之间的variation可以通过一定数量的HVGs来表示
+
+
+选出来的HVGs用于下游的降维等分析，如PCA等。Seurat V3相比于Seurat V2在HVGs selection方面有提升，考虑到了mean-variance relationship。自己比较喜欢用scran的`trendVar`，<https://bioconductor.org/packages/devel/bioc/vignettes/scran/inst/doc/scran.html> 里面有比较详细的介绍mean-variance relationship。
+
+不同计算方法得到的HVGs选择对后续的结果差异不会太大，因为那些特别重要的一般也都会保留。如果结果不好，可以考虑尝试不同方法并进行比较。
+
+另外，如HVGs的个数，对结果影响也不是很大，一般设置在500-2000之间。
+
+
+```{r var_features, fig.height=5, fig.width=11}
+pbmc <- FindVariableFeatures(object = pbmc, selection.method = 'vst', 
+                             nfeatures = 2000, assay="RNA")
+
+# Identify the 10 most highly variable genes
+top10 <- head(x = VariableFeatures(object = pbmc), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(object = pbmc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+CombinePlots(plots = list(plot1, plot2))
+```
+
+上图中的top10用于展示top HVGs，可以把具体名字在图中展示出来。当然，这个在R语言绘图中是常规操作。
+
+```{r}
+tmp.df<-VariableFeatures(object = pbmc)
+```
+
+
+```{r}
+head(tmp.df)
+```
+
+
+
+#### Scaling the data 基因归一化
+
+
+这一步骤有待商榷，有些方法或软件并不包含下面两个步骤，此外，对效果提升有多大帮助，也值得留意。
+
+首先，并不是所有降维方法都要求先做中心化 (centering) 的，PCA默认需要做centering，但是一般会算在PCA本身的步骤里。其次，HVGs之间的variance不一样，本身也是有意义的，另外本身variance较小的HVGs，归一化后variance就相对被放大了，引入了不真实的信息。
+
+Next, we apply a linear transformation ('scaling') that is a standard pre-processing step prior to dimensional reduction techniques like PCA. The `ScaleData` function:
+
+* Shifts the expression of each gene, so that the mean expression across cells is 0
+* Scales the expression of each gene, so that the variance across cells is 1
+    + This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+* The results of this are stored in `pbmc[["RNA"]]@scale.data`
+
+features可以选择是对哪些基因进行scale，默认是对之前鉴定的HVGs进行scale，而对所有gene进行scale的一个好处是，下游分析所涉及到的基因不局限于HVGs，比如说heatmap的时候需要对表达值进行比较。
+
+值得注意的是，ScaleData这一步比较慢。
+
+```{r regress, fig.height=7, fig.width=11, results='hide'}
+all.genes <- rownames(x = pbmc)
+pbmc <- ScaleData(object = pbmc, features = all.genes)
+```
+
+细胞中基因表达的变化一部分来源于细胞自身转录水平，还有一部分可能来源于技术噪音、批次效应或可能不关注的细胞自身因素如细胞周期的不同。移除这些因素的影响，会改善下游的细胞分型和鉴定的能力。
+
+Seurat通过构建线性模型，预测提供的变量因素对基因表达的影响，并将这些值存储在`scale.data`数据通道中，用于后续的降维和聚类。
+
+常见的影响基因表达的噪音变量有批次效应 (需要详细记录样本来源和操作信息)、细胞reads比对率、总检测到的基因数、线粒体基因的表达、细胞周期
+
+```{r}
+# 这一步在Seurat2的教程中有，到了3就去掉了
+# Seurat3还增加了 sctransform 可以一步完成整个操作
+# pbmc <- ScaleData(object = pbmc, features = rownames(x = pbmc), 
+#                  vars.to.regress = c("nCount_RNA", "percent.mt"), assay="RNA")
+```
+
+
+
+
+### Step 5: Perform linear dimensional reduction 线性降维PCA分析
+
+查看数据整体分布的最简单方式是[PCA主成分分析](https://mp.weixin.qq.com/s/ZKvQieq_6KX6l6LZyUz7jA),在其前两个主成分轴查看数据的分布。
+
+[主成分分析 (PCA)](https://en.wikipedia.org/wiki/Principal_component_analysis)是一种数学降维方法, 利用正交变换 (orthogonal transformation)把一系列可能线性相关的变量转换为一组线性不相关的新变量，也称为主成分，从而利用新变量在更小的维度下展示数据的特征。
+
+PCA分析不是简单地选取2个或3个变化最大的基因，而是先把原始的变量做一个评估，计算各个变量各自的变异度(方差)和两两变量的相关度（协方差），得到一个协方差矩阵。在这个协方差矩阵中，对角线的值为每一个变量的方差，其它值为每两个变量的协方差。随后对原变量的协方差矩阵对角化处理，即求解其特征值和特征向量。原变量与特征向量的乘积（对原始变量的线性组合）即为新变量（回顾下线性代数中的矩阵乘法）；新变量的协方差矩阵为对角协方差矩阵且对角线上的方差由大到小排列；然后从新变量中选择信息最丰富也就是方差最大的的前2个或前3个新变量也就是主成分用以可视化。
+
+默认Seurat使用鉴定出的高变化基因作为特征基因集执行PCA降维 （可以通过`features`参数来设定用于降维的gene set）。但对基于UMI且校正过技术重复的数据，即便用更大的基因集或者全部基因一般结果差别不大。
+
+
+
+```{r pca,results='hide'}
+pbmc <- RunPCA(object = pbmc, 
+               features = VariableFeatures(object = pbmc, assay="RNA"), 
+               verbose = FALSE, assay="RNA")
+```
+
+Seurat提供了多个工具对降维结果进行可视化，来评估降维的效果，如`VizDimReduction`, `DimPlot`, and `DimHeatmap`。
+
+#### 可视化对主成分贡献最大的基因
+
+看每一个PC上有着主要贡献的基因
+
+```{r pca_viz, message=TRUE}
+# Examine and visualize PCA results a few different ways
+print(x = pbmc[['pca']], dims = 1:5, nfeatures = 5, projected = FALSE)
+```
+
+看每一个PC上有着主要贡献的基因
+
+```{r, fig.height=6, fig.width=10}
+VizDimLoadings(object = pbmc, dims = 3:4, reduction = 'pca')
+```
+
+PC1和PC2所capture的variation是最大的，以PC1和PC2为横纵坐标，看cell的分布情况。
+这里基本上能看出降维做得好不好了，当然还有根据不同的meta data来对细胞进行上色。
+`reduction`参数蛮重要的，决定是用哪一个降维的结果，背后都是一个`low-dimensional matrix`。当`reduction`参数未指明的时候，按UMAP、t-SNE、PCA的顺序来找。
+
+```{r}
+DimPlot(object = pbmc, reduction = 'pca') + coord_fixed()
+```
+
+除了可视化PC1，PC2，还可以加上PC3，或更多主成分。
+
+```{r, fig.height=4, fig.width=13}
+p1 <- DimPlot(object = pbmc) + NoLegend()
+p2 <- DimPlot(object = pbmc, dims = c(2, 3)) + NoLegend()
+p3 <- DimPlot(object = pbmc, dims = c(1, 3)) + NoLegend()
+cowplot::plot_grid(p1, p2, p3, nrow=1, ncol=3)
+```
+
+提取数据，自定义PCA可视化属性
+
+```{r, fig.height=5, fig.width=13}
+pca <- FetchData(pbmc, vars=c("PC_1","PC_2","PC_3", colnames(pbmc@meta.data)))
+p1 <- ggplot(pca, aes(x=PC_1, y=PC_2)) + 
+  geom_point(aes(size=nFeature_RNA, color=phases), alpha=0.5) + 
+  NoLegend() + coord_fixed()
+p2 <- ggplot(pca, aes(x=PC_1, y=PC_3)) + 
+  geom_point(aes(size=nFeature_RNA, color=phases), alpha=0.5)+ 
+  NoLegend() + coord_fixed()
+p3 <- ggplot(pca, aes(x=PC_2, y=PC_3)) + 
+  geom_point(aes(size=nFeature_RNA, color=phases), alpha=0.5) + 
+  NoLegend() + coord_fixed()
+cowplot::plot_grid(p1, p2, p3, nrow=1, ncol=3)
+```
+
+展示对主成分贡献大的基因在PCA可视化中的分布
+
+```{r, fig.width=8.5, fig.height=4}
+FeaturePlot(object = pbmc, features = c("CST3","NKG7"), reduction="pca")
+```
+
+
+In particular `DimHeatmap` allows for easy exploration of the primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses. Both cells and features are ordered according to their PCA scores. Setting `cells` to a number plots the 'extreme' cells on both ends of the spectrum, which dramatically speeds plotting for large datasets. Though clearly a supervised analysis, we find this to be a valuable tool for exploring correlated feature sets.
+
+`DimHeatmap`主要用来看细胞在特定PC上的表达pattern，有看到pattern，说明这个PC包含重要的信息，能够解释variation。（总体来说，用处不是很大）
+
+```{r single-heatmap}
+DimHeatmap(object = pbmc, dims = 1, cells = 500, balanced = TRUE)
+```
+
+```{r multi-heatmap, fig.height=12, fig.width=9}
+DimHeatmap(object = pbmc, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+绘制与各个主成分最正负相关的30个基因在top 500变化的细胞系中的表达状态。
+
+```{r, fig.width=10, fig.height=12}
+DimHeatmap(object = pbmc, dims = 1:12, cells = 500, balanced = TRUE, assays = 'RNA')
+```
+
+### Step 6: Determine the 'dimensionality' of the dataset
+
+为了避免每个基因的技术噪音带来的影响，Seurat使用鉴定出的主成分代表一系列相关的基因今后后续细胞分型。因此确定使用多少主成分用于后续分析十分重要。
+
+Seurat应用随机抽样构建一个特征基因与主成分相关性值得背景分布，选择富集特征基因相关性显著的主成分用于后续分析。对大的数据集，这一步计算会比较慢，有时也可能不会找到合适的临界点。下图中虚线为随机值，在虚线上方的点都是显著性主成分。
+
+`JackStraw`计算很慢，在大数据集上并不合适，`JackStrawPlot`函数用来可视化，看选几个PC比较合适，和`ElbowPlot`函数的作用是类似的。
+
+PC选的数目并没有非常好的方法来确定，一定范围内的PC数目对结果的影响并不会太大，比如下面说的PC选15和25，差别不会有很多。
+
+建议通过ElbowPlot来选，找到拐点或使得所选PC包含足够大的variation了 (80%以上)，便合适。然后再可以在这个数目上下都选几个值试试，最好测试的时候往下游测试些，越下游越好，看看对结果是否有影响。
+
+
+```{r jackstraw, fig.height=6, fig.width=10}
+# NOTE: This process can take a long time for big datasets, comment out for expediency. 
+# More approximate techniques such as those implemented in ElbowPlot() 
+# can be used to reduce computation time
+# pbmc <- JackStraw(object = pbmc, num.replicate = 100)
+# pbmc <- ScoreJackStraw(object = pbmc, dims = 1:20)
+```
+
+The `JackStrawPlot` function provides a visualization tool for comparing the distribution of p-values for each PC with a uniform distribution (dashed line). 'Significant' PCs will show a strong enrichment of features with low p-values (solid curve above the dashed line). In this case it appears that there is a sharp drop-off in significance after the first 10-12 PCs.
+
+```{r jsplots, fig.height=6, fig.width=10}
+# JackStrawPlot(object = pbmc, dims = 1:15)
+```
+
+An alternative heuristic method generates an 'Elbow plot': a ranking of principle components based on the percentage of variance explained by each one (`ElbowPlot` function). In this example, we can observe an 'elbow' around PC9-10, suggesting that the majority of true signal is captured in the first 10 PCs. 
+
+```{r elbow_plot, fig.height=6, fig.width=10}
+ElbowPlot(object = pbmc)
+```
+
+另外一个方式可以是根据与各个主成分相关的基因的GSEA功能富集分析选择合适的主成分。
+
+一般选择`7-12`都合适。实际分析时，可以尝试选择不同的值如`10`, `15`或所有主成分，结果通常差别不大。但如果选择的主成分比较少如5等，结果可能会有一些变化。
+
+
+### Step 7: Cluster the cells 聚类分析
+
+
+#### Graph-based clustering
+
+Seurat采用基于图论的算法 (graph-based clustering)把细胞嵌入类似K-近邻图中，边代表细胞之间表达谱的相似性。并尝试鉴定其中高度内联的集团作为一个细胞群体。PhenoGraph算法是先计算细胞在PCA空间的欧式距离获得K-nearest neighbor (KNN)网络图，根据任意两个细胞共有的周边邻居的数目 (jaccard相似性)重新对边的权重进行加权 (上述步骤通过`FindNeighbors`函数实现)。
+
+然后，对上述KNN graph进行聚类，也就是对细胞进行聚类。细胞聚类时，采用模块性优化算法，如Louvain algorithm或SLM等。模块性高是指模块内的点连接特别致密，模块间的点连接特别稀疏。Louvain algorithm算法采用迭代方式，先计算每个点加入其邻居节点所在社区带来的模块性收益，选择收益最大的邻居节点加入其所在社区，不断重复这一过程，直至结果稳定。然后再把每个社区作为一个节点，重复上一步。
+
+`FindClusters`函数是这一算法的实现，其中有一个网络分辨率的参数中**resolution是非常关键的一个参数**，数值越大，得到的cluster数目越多，聚类数对后续的结果影响很大，因为不是越多越好，也不是越少越好，聚出来的类要有生物学意义。3000个细胞左右的数据集，这个值在0.4-1.2之间比较合适。自己使用过程中一般为0.25-2.5之间。和PC数目选择一样，这是一个调参的过程，最好是多选一些值尝试，并且需要跑到比较后面的分析来回头看下，resolution数值的设定是否合理。
+
+graph-based clustering计算速度还是很可以的。
+
+
+
+
+
+```{r cluster, fig.height=5, fig.width=7}
+## dims表示选用哪几个PC来计算细胞之间的距离
+pbmc <- FindNeighbors(object = pbmc, dims = 1:10, assay="RNA")
+pbmc <- FindClusters(object = pbmc, resolution = 0.5, graph.name = "RNA_snn")
+```
+
+聚类的结果，能够通过`Idents`函数来获取。
+
+```{r}
+# Look at cluster IDs of the first 10 cells
+head(x = Idents(object = pbmc), 10)
+```
+
+```{r}
+# 查看各个类群的细胞数
+table(Idents(pbmc))
+# 查看每个细胞系所属的类群
+head(as.data.frame(Idents(pbmc)))
+```
+
+
+#### K-means clustering
+
+我们先将Seurat的结果保存一份，然后来尝试下其他聚类方法。
+
+```{r}
+seurat.ident<-Idents(object = pbmc)
+```
+
+
+```{r}
+table(seurat.ident)
+```
+
+
+首先，我们先尝试下K-means聚类。
+
+最关键的，我们需要拿到存储在Seurat上面的降维后的矩阵，这些矩阵都存储在`pbmc@reductions`上面，比如PCA在`pbmc@reductions$pca@cell.embeddings`，而UMAP为`pbmc@reductions$umap`。
+
+我们可以先看下矩阵的形状：
+
+```{r}
+# 注意不同符号 @和$的使用
+dim(pbmc@reductions$pca@cell.embeddings)
+```
+
+然后看下矩阵的前几行，前几列：
+
+```{r}
+pbmc@reductions$pca@cell.embeddings[1:4,1:4]
+```
+
+
+
+然后我们用kmeans进行聚类，因为K-means受随机初始值影响，所以为了结果可重复，我们需要`set.seed()`固定一个随机数种子。
+
+K-means中centers，即类别的数目选择很重要，可以先在降维可视化中判断下大概有多少类，然后再结合下游marker分析来判断聚类是否合理。
+
+K-means的计算速度相对还是很快的。
+
+```{r}
+# Refer to: https://www.datanovia.com/en/lessons/k-means-clustering-in-r-algorith-and-practical-examples/
+# Compute k-means with k = 10
+set.seed(940309)
+kmeans_res<- kmeans(pbmc@reductions$pca@cell.embeddings, centers=9, nstart = 25)
+kmeans.ident<-kmeans_res$cluster
+```
+
+
+
+
+```{r}
+table(seurat.ident)
+```
+
+
+```{r}
+table(kmeans.ident)
+```
+
+然后把Kmeans得到的结果存到Seurat对象的相应位置。
+
+```{r}
+Idents(object = pbmc) <- kmeans.ident
+```
+
+接着，进行可视化，看下K-means聚类的结果是否可靠
+
+```{r fig.height=5, fig.width=7}
+# note that you can set `label = TRUE` or 
+# use the LabelClusters function to help label individual clusters
+DimPlot(object = pbmc, reduction = 'pca')
+```
+
+#### Hierarchical Clustering 层级聚类
+
+
+下面，我们介绍下Hierarchical Clustering，以`hclust`包为例，进行`Agglomerative Hierarchical Clustering（bottom-up）`。
+
+需要先计算距离矩阵
+
+```{r}
+# Dissimilarity matrix
+hclust.dist <- dist(pbmc@reductions$pca@cell.embeddings, 
+                    method = "euclidean")
+```
+
+这里，`method`参数用于指定我们用哪种方法来进行计算，"ward.D2"比较常用，其他的方法可以试试
+（比如尝试了"centroid"，效果并不好）
+
+```{r}
+# Hierarchical clustering using Complete Linkage
+hclust_res <- hclust(hclust.dist, method = "ward.D2" )
+```
+
+然后，我们按照预设的类别数来进行cut（因为Hierarchical Clustering得到的是树形结构），这里应该分成几类，会遇到和K-means clustering中关于聚类数目选择的同样问题。
+
+```{r}
+hclust.ident <- cutree(hclust_res, k=9)
+```
+
+```{r}
+table(hclust.ident)
+```
+
+
+然后把Hierarchical Clustering得到的结果存到Seurat对象的相应位置
+
+```{r}
+Idents(object = pbmc)<-hclust.ident
+```
+
+接着，进行可视化，看下Hierarchical Clustering的结果是否可靠
+
+```{r fig.height=5, fig.width=7}
+# note that you can set `label = TRUE` or 
+# use the LabelClusters function to help label individual clusters
+DimPlot(object = pbmc, reduction = 'pca')
+```
+
+为方便下游分析，我们将聚类结果重新赋值为Seurat的graph-based clustering的结果：
+
+```{r}
+Idents(object = pbmc)<-seurat.ident
+```
+
+```{r fig.height=5, fig.width=7}
+# note that you can set `label = TRUE` or 
+# use the LabelClusters function to help label individual clusters
+DimPlot(object = pbmc, reduction = 'pca')
+```
+
+
+### Step 8: Run non-linear dimensional reduction (UMAP/tSNE) UMAP和t-SNE降维
+
+Seurat这里调用的是UMAP的python代码，所以需要先进行安装：
+（安装之后可能得restart session）。
+
+UMAP算法，均匀流形近似和投影（UMAP/uniform manifold approximation and projection）一种类似于t-SNE的数据降维算法。依赖于Python的包`umap-learn`。
+
+优点是速度比tSNE快，通常能提供比t-SNE更好的全局结构，支持更多的距离函数，支持有监督和半监督的降维。具体见 <https://pypi.org/project/umap-learn/>。
+
+
+```{r}
+# reticulate::py_install(packages = "umap-learn")
+```
+
+
+```{r umap, fig.height=5, fig.width=7}
+pbmc <- RunUMAP(object = pbmc, dims = 1:10)
+```
+
+```{r umapplot, fig.height=5, fig.width=7}
+# note that you can set `label = TRUE` or 
+# use the LabelClusters function to help label individual clusters
+DimPlot(object = pbmc, reduction = 'umap')
+```
+
+每个类分别展示
+
+```{r, fig.width=15}
+DimPlot(object = pbmc, reduction = 'umap', split.by="ident")
+```
+
+当做了不少分析的时，可以考虑把对象输出，这样下次到这里的时候，就不用重新再运行上述步骤了，这是一个好的习惯。
+
+
+```{r, eval=F}
+# 可选，存储变量，方便下次导入或分享给朋友
+# saveRDS(pbmc, file = "pbmc_data.rds")
+# 重新读入
+# pbmc <- readRDS("pbmc_data.rds")
+```
+
+### tSNE聚类
+
+scRNA-seq中另一个常用的可视化方法是`tSNE`。[tSNE](https://lvdmaaten.github.io/tsne/) (t-Distributed Stochastic Neighbor Embedding) 通过组合降维（如PCA）和最近邻网络随机行走算法在保留细胞的局部距离的基础上实现高维数据到二维空间的映射。与PCA不同，`tSNE`算法有随机性，每次运行结果都会不同。因为它的非线性和随机性特征，`tSNE`结果难以直观解释。为了保证重复性，我们固定一个随机数种子使得每次结果都一致。
+
+PCA线性降维算法在集中将不相似的数据点放置在较低维度区域时，尽可能多的保留原始数据的差异，因此导致小部分数据点相距甚远，大部分数据重叠放置。tSNE把点的高维空间的`距离`转换成点的`相似度的概率`，维持高维空间和低维空间中一对点之间的`条件概率差值总和最小`。同时使用`t-分布的长尾性解决高维数据映射到低维时的重叠问题`。t-SNE算法定义了数据的局部和全局结构之间的软边界，既可以使点在局部分散，又在全局聚集，同时照顾近距离和远距离的点。其性能优于任何非线性降维算法。具体见推文[还在用PCA降维？快学学大牛最爱的t-SNE算法吧（附Python/R代码）](https://mp.weixin.qq.com/s/alBfj3Y08qCnZoz5JwVdaw)和B站视频<https://www.bilibili.com/video/av19592239?from=search&seid=1152699498338102899>。
+
+
+```{r, eval=F}
+# dims参数与FindNeighbors一致
+pbmc <- RunTSNE(object = pbmc, dims = 1:10)
+```
+
+
+
+```{r, eval=F}
+# note that you can set `label = TRUE` or use the LabelClusters function to help label individual clusters
+DimPlot(object = pbmc, reduction = 'tsne')
+```
+
+
+```{r}
+DimPlot(object = pbmc, reduction = 'pca')
+```
+
+
+```{r, eval=F}
+# DimPlot(object = pbmc, reduction = 'tsne', split.by="ident")
+```
+
+
+
+
+### Step 9: Finding differentially expressed features (cluster biomarkers) 鉴定marker gene
+
+Seurat通过基因差异表达分析来鉴定marker gene，`FindMarkers`函数将`ident.1`类与所有其他类进行比较，同时找到上调或者下调的基因。
+
+
+`min.pct`和`max.cells.per.ident`等参数主要为了避免一些不太可能的比较，相当于有些基因不太可能是marker gene，于是通过一些条件先把这些基因挑选出来，不再做比较。
+
+* `min.pct`: 基因在最少多大比例的细胞中检测到才用于后续的检测分析
+* `logfc.threshold`: 高于给定的最小的变化倍数 (log-scale)的基因用于后续统计分析。数值越大，计算会越快，差异基因可能会少。 
+* `max.cells.per.ident`: 每个分类簇最大允许的细胞数目。这个值越低，运算速度会越快，但会损失检测的统计强度。当然差异特别大的基因还是会保留。个人不推荐使用。
+
+
+```{r markers31, fig.height=8, fig.width=15}
+# find all markers of cluster 1
+cluster1.markers <- FindMarkers(object = pbmc, 
+                                ident.1 = 1, 
+                                min.pct = 0.25)
+head(x = cluster1.markers, n = 5)
+```
+
+`FindMarkers`还有`ident.2`参数，这个比较好用，可以用来找marker gene用于区分`cluster A`和`cluster B`，或者是找将`cluster A`和`cluster B, C, D`区分开的marker gene。
+
+这个很好用，比如说鉴定出一个subtype来，那么需要比较并说明这个subtype和相近的cell type之间有什么不一样的地方，找到用于区分的marker gene，然后再结合heatmap等可视化来说明这个subtype是否有价值。
+
+```{r markers21, fig.height=8, fig.width=15}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster5.markers <- FindMarkers(object = pbmc, 
+                                ident.1 = 5, 
+                                ident.2 = c(0, 3), 
+                                min.pct = 0.25)
+head(x = cluster5.markers, n = 5)
+```
+
+`FindAllMarkers` 鉴定每个cluster的Marker基因。`only.pos`设定为TRUE后，可以只找上调表达的基因，这比较常用。
+
+```{r markers1, fig.height=8, fig.width=15}
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+pbmc.markers <- FindAllMarkers(object = pbmc, only.pos = TRUE, 
+                               min.pct = 0.25, logfc.threshold = 0.25,
+                               assay="RNA")
+(top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_logFC))
+```
+
+输出差异分析结果用于富集分析
+
+```{r}
+de_gene <- pbmc.markers[,c("gene","cluster")]
+####导出数据
+# write.table(de_gene, file="All.de.gene.symbol", quote=F, row.names=F)
+```
+
+Seurat has several tests for differential expression which can be set with the test.use parameter (see our [DE vignette](http://satijalab01.nygenome.org/seurat/v3.0/de_vignette.html) for details). For example, the ROC test returns the 'classification power' for any individual marker (ranging from 0 - random, to 1 - perfect).
+
+不同的test，marker gene的ranking会发生变化，但整体上差别不会很大。
+
+```{r markersroc, fig.height=8, fig.width=15}
+# cluster1.markers <- FindMarkers(object = pbmc, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+```
+
+### Step 10: Visualization of marker genes
+
+最常用的：
+
+* `VlnPlot` (shows expression probability distributions across clusters)
+* `FeaturePlot` (visualizes feature expression on a tSNE or PCA plot)
+
+#### VlnPlot
+
+```{r markerplots, fig.height=5, fig.width=16}
+VlnPlot(object = pbmc, features = top10$gene[c(1,3,5)])
+# VlnPlot(pbmc, features = c("MS4A1", "CD79A"))
+# you can plot raw counts as well
+# VlnPlot(object = pbmc, features = c("NKG7", "PF4"), 
+#         slot = 'counts', log = TRUE)
+```
+
+
+#### FeaturePlot
+
+
+基因表达变化映射到分类空间，直观查看每种类型细胞高表达基因
+
+```{r markerplots, fig.height=8, fig.width=15}
+# FeaturePlot(object = pbmc, features = c("MS4A1", "GNLY", "CD3E", 
+#             "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP", "CD8A"))
+FeaturePlot(object = pbmc, features = c("MS4A1", "GNLY", "CD3E", "CD14"))
+```
+
+
+```{r, fig.width=16, fig.height=12}
+FeaturePlot(object = pbmc, features = top10$gene[c(1,3,5,7,9,11)], label.size = 2)
+```
+
+基因表达结果热图展示
+
+```{r, fig.width=16, fig.height=12}
+#pbmc.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC) -> top10
+(p <- DoHeatmap(object = pbmc, features = top10$gene) + NoLegend())
+# 存储为文件
+# ggsave("DE_gene_heatmap.pdf",p , width=30, height=22, units=c("cm"))
+```
+
+
+#### RidgePlot
+
+
+```{r, fig.width=16, fig.height=12}
+# Ridge plots - from ggridges. Visualize single cell expression distributions in each cluster
+RidgePlot(pbmc, features = c("MS4A1", "GNLY", "CD3E", "CD14"), ncol = 2)
+```
+
+#### DotPlot
+
+```{r, fig.width=10, fig.height=8}
+# Dot plots - the size of the dot corresponds to the percentage of cells expressing the feature
+# in each cluster. The color represents the average expression level
+DotPlot(pbmc, features =  c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", 
+                            "FCGR3A", "LYZ", "PPBP", "CD8A")) + RotatedAxis()
+```
+
+
+
+
+### Step 11: Assigning cell type identity to clusters 根据Marker或基因富集结果确定细胞类型
+
+查看top marker gene。
+
+```{r}
+pbmc.markers %>% group_by(cluster) %>% 
+  top_n(n = 6, wt = avg_logFC) %>% 
+  dplyr::select(gene, cluster) %>% 
+  group_by(cluster) %>% 
+  dplyr::summarise(marker=paste(gene, collapse = ", "))
+```
+
+Fortunately in the case of this dataset, we can use canonical markers to easily match the unbiased clustering to known cell types:
+
+Cluster ID | Markers       | Cell Type
+-----------|---------------|----------
+0          | IL7R, CCR7    | Memory CD4+ 
+1          | CD14, LYZ     | CD14+ Mono
+2          | IL7R, S100A4  | Naive CD4+ T 
+3          | MS4A1         | B 
+4          | CD8A          | CD8+ T 
+5          | FCGR3A, MS4A7 | FCGR3A+ Mono
+6          | GNLY, NKG7    | NK 
+7          | FCER1A, CST3  | DC
+8          | PPBP          | Mk
+
+这部分难点不在代码，而在于得到marker gene后根据专业知识来判断每个cluster属于什么细胞类型.
+
+```{r labelplot, fig.height=5, fig.width=9}
+new.cluster.ids <- c("Memory CD4 T", "CD14+ Mono", "Naive CD4 T", "B", "CD8 T", "FCGR3A+ Mono", "NK", "DC", "Mk")
+names(x = new.cluster.ids) <- levels(x = pbmc)
+pbmc <- RenameIdents(object = pbmc, new.cluster.ids)
+DimPlot(object = pbmc, reduction = 'umap', label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+```{r save.img, include=FALSE}
+library(ggplot2)
+plot <- DimPlot(object = pbmc, reduction = "umap", 
+                label = TRUE, label.size = 4.5) + 
+  xlab("UMAP 1") + ylab("UMAP 2") + 
+  theme(axis.title = element_text(size = 18), legend.text = element_text(size = 18)) + 
+  guides(colour = guide_legend(override.aes = list(size = 10)))
+# ggsave(filename = "pbmc3k_umap.png", height = 7, width = 12, plot = plot)
+```
+
+Check the plot
+
+```{r}
+plot
+```
+
+保存数据
+
+```{r save.rds}
+saveRDS(pbmc, file = "pbmc3k_final.rds")
+```
+
+### 基于Cellassign的分型 
+
+#### PBMC提供的Marker
+
+```{r}
+library(cellassign)
+library(scran)
+library(Seurat)
+# pbmc <- readRDS("pbmc3k_final.rds")
+pbmc_sce <- as.SingleCellExperiment(pbmc)
+
+qclust <- quickCluster(pbmc_sce, min.size = 30)
+pbmc_sce <- computeSumFactors(pbmc_sce, sizes = 15, clusters = qclust)
+pbmc_sce <- normalize(pbmc_sce)
+
+marker_list<- list(Memory_CD4_pos = c("IL7R", "CCR7","CD27"),
+                   CD14_pos_Mono = c("CD14", "LYZ"),
+                   Naive_CD4_pos_T = c("IL7R", "S100A4"),
+                   B = c("MS4A1"),
+                   CD8_pos_T = c("CD8A"),
+                   FCGR3A_pos_Mono = c("FCGR3A", "MS4A7"),
+                   NK = c("GNLY", "NKG7"),
+                   DC = c("FCER1A", "CST3"),
+                   Mk = c("PPBP"))
+
+
+print(str(marker_list))
+marker_list <- marker_list_to_mat(marker_list)
+print(marker_list)
+#
+#
+# cellassign object
+# 获取sizefactor
+s <- sizeFactors(pbmc_sce)
+
+# cellassign函数需要的scater对象是单细胞实验或输入的基因表达矩阵的子集，
+# 只包含marker_list中含有的Marker gene的行；
+# 需要一步过滤
+# 注意：Marker gene中基因的命名规则与sceset中基因命名规则一致，
+# 比如都为ENSEMBL ID或都为Gene Symbol）
+
+# 查看是否存在交集
+intersect(rownames(marker_list), rownames(pbmc_sce))
+
+# 对scater对象进行筛选
+pbmc_sce_sub <- pbmc_sce[intersect(rownames(marker_list), rownames(pbmc_sce)),]
+
+# 这一步运行需要30分钟左右
+fit <- cellassign(exprs_obj = pbmc_sce_sub,
+                  marker_gene_info = marker_list,
+                  s = s,
+                  learning_rate = 1e-2,
+                  shrinkage = TRUE,
+                  verbose = FALSE)
+# saveRDS(fit, file = "pbmc3k_final_cellassign_fit.rds")
+# fit <- readRDS("pbmc3k_final_cellassign_fit.rds")
+
+print(fit)
+
+pheatmap::pheatmap(cellprobs(fit))
+
+head(cellprobs(fit))
+
+head(celltypes(fit))
+
+pbmc2 = pbmc
+Idents(object = pbmc2) <- celltypes(fit)
+# https://mp.weixin.qq.com/s/_imMTkVwxUmb4Lk0scqHHg
+
+DimPlot(object = pbmc2, reduction = 'umap', label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+#### 自己找的Marker
+
+```{r}
+library(cellassign)
+library(scran)
+library(Seurat)
+# pbmc <- readRDS("pbmc3k_final.rds")
+pbmc_sce <- as.SingleCellExperiment(pbmc)
+
+qclust <- quickCluster(pbmc_sce, min.size = 30)
+pbmc_sce <- computeSumFactors(pbmc_sce, sizes = 15, clusters = qclust)
+pbmc_sce <- normalize(pbmc_sce)
+
+
+marker_list<- list(Memory_CD4_pos = c("IL7R", "CCR7"),
+                    CD14_pos_Mono = c("CD14", "LYZ", "CD16", "CD68", "S100A12"),
+                    Naive_CD4_pos_T = c("IL7R", "S100A4", "ABLIM1", "ACTN1", 
+                                  "C1orf162", "C6orf48", "CCR7", "CD55", "EEF1B2", 
+                                  "EIF3L", "FAM117B", "FHIT", "ABLIM1", "ACTN1", "C1orf162", "C6orf48", "CCR7", "CD55", "EEF1B2", "EIF3L", "FAM117B", "FHIT", "GIMAP5", "GIMAP8", "GPR183", "IL7R", "LDLRAP1", "LRRC75A-AS1", "LRRN3", "MAL", "MYC", "NELL2", "NOSIP", "PRKCA", "RPS5", "RSL1D1", "SATB1", "SERINC5", "SLC40A1", "SVIL", "TCF7", "TESPA1", "TMEM204", "TRABD2A", "TSHZ2", "TXK"),
+                   B = c("MS4A1", "BLNK", "CD19", "CD79A", "CD79B", "MS4A1"),
+                   CD8_pos_T = c("CD4", "CD8A", "CD8B", "GZMK"),
+                   FCGR3A_pos_Mono = c("FCGR3A", "MS4A7"),
+                   NK = c("CCL3", "CD160", "CD247", "GNLY", "GZMB", "NKG7", "FCGR3A", "FCGR3B", "KLRB1", "KLRB1", "KLRC1", "KLRD1", "KLRF1", "KLRK1", "NCAM1", "ID2"
+),
+                   DC = c("FCER1A", "CST3", "CLEC4C", "IL3RA", "NRP1", "CD11c", "CD80", "CD86"),
+                   Mk = c("PPBP", "CD14", "CD15", "CD33","PF4")
+                  )
+
+
+print(str(marker_list))
+marker_list <- marker_list_to_mat(marker_list)
+print(marker_list)
+#
+#
+# cellassign object
+# 获取sizefactor
+s <- sizeFactors(pbmc_sce)
+
+# cellassign函数需要的scater对象是单细胞实验或输入的基因表达矩阵的子集，
+# 只包含marker_list中含有的Marker gene的行；
+# 需要一步过滤
+# 注意：Marker gene中基因的命名规则与sceset中基因命名规则一致，
+# 比如都为ENSEMBL ID或都为Gene Symbol）
+
+# 查看是否存在交集
+marker_intersect <- intersect(rownames(marker_list), rownames(pbmc_sce))
+
+# 对Marker list进行筛选
+marker_list <- marker_list[marker_intersect,,drop=F]
+
+# 对scater对象进行筛选
+pbmc_sce_sub <- pbmc_sce[intersect(marker_intersect, rownames(pbmc_sce)),]
+
+# 运行46分钟
+fit <- cellassign(exprs_obj = pbmc_sce_sub,
+                  marker_gene_info = marker_list,
+                  s = s,
+                  learning_rate = 1e-2,
+                  shrinkage = TRUE,
+                  verbose = FALSE)
+
+saveRDS(fit, file = "pbmc3k_final_cellassign_fit_selfmarker.rds")
+# fit <- readRDS("pbmc3k_final_cellassign_fit.rds")
+
+print(fit)
+
+pheatmap::pheatmap(cellprobs(fit))
+
+head(cellprobs(fit))
+
+head(celltypes(fit))
+
+pbmc3 = pbmc
+Idents(object = pbmc3) <- celltypes(fit)
+# https://mp.weixin.qq.com/s/_imMTkVwxUmb4Lk0scqHHg
+
+DimPlot(object = pbmc3, reduction = 'umap', label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+
+
+
+### 细胞分型细化
+
+```{r}
+# First lets stash our identities for later
+pbmc <- StashIdent(object = pbmc, save.name = "ClusterNames_0.5")
+#### 改变resolution
+# Note that you don't need to recalculate the SNN, and can simply put: 
+pbmc <- FindClusters(object = pbmc, dims = 1:10, resolution = 0.8)
+```
+
+```{r, fig.width=10, fig.height=5}
+plot1 <- DimPlot(object = pbmc, label = TRUE)
+plot2 <- DimPlot(object = pbmc, group.by = "ClusterNames_0.5", label = TRUE)
+CombinePlots(plots = list(plot1, plot2), legend = 'none')
+```
+
+```{r}
+# 重新退回之前的分类，如果有必要的话
+Idents(object = pbmc) <- 'ClusterNames_0.5'
+###保存变量
+# saveRDS(pbmc, file = "pbmc3k_final.rds")
+```
+
+查看工作路径：
+```{r}
+getwd()
+```
+
+
+### 番外
+
+ROC曲线获得每个基因对cluster的分类贡献
+
+```{r}
+cluster1.markers <- FindMarkers(object = pbmc, ident.1 = "Naive CD4 T", logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+head(cluster1.markers)
+```
+
+读入包含更多信息的Metadata，自定义样本分组
+
+```{r, eval=F}
+# meta <- read.table("metadata.txt",sep="\t",quote="", row.names=1,header=T)
+# head(meta)
+```
+
+```{r}
+# pbmc2 <- CreateSeuratObject(counts = pbmc.data, min.cells = 3, 
+#                            min.features = 200, 
+#    project = "10X_PBMC", meta.data = meta)
+# head(Idents(pbmc2))
+# Idents(pbmc2) <- FetchData(pbmc2,c("bio_group"))$bio_group
+# head(Idents(pbmc2))
+```
+
+提取特定cluster，继续后续分析。
+
+```{r}
+ident_df <- data.frame(cell=names(Idents(pbmc)), cluster=Idents(pbmc))
+pbmc_subcluster <- subset(pbmc, cells=as.vector(ident_df[ident_df$cluster=="Naive CD4 T",1]))
+```
+
+The Assay object is the basic unit of Seurat; each Assay stores raw, normalized, and scaled data as well as cluster information, variable features, and any other assay-specific metadata. Assays should contain single cell expression data such as RNA-seq, protein, or imputed expression data.
+
+Slots
+
+* counts: Unnormalized data such as raw counts or TPMs
+* data: Normalized expression data
+* scale.data: Scaled expression data
+* key: Key for the Assay
+* var.features: Vector of features exhibiting high variance across single cells
+* meta.features: Feature-level metadata
+* misc: Utility slot for storing additional data associated with the assay
+
+https://satijalab.org/seurat/pbmc3k_tutorial.html
